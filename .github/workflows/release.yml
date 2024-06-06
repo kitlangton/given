@@ -51,28 +51,28 @@ jobs:
           tag: ${{ github.ref }}
           overwrite: true
 
-  update-homebrew:
-    needs: release
-    runs-on: ubuntu-latest
+  # update-homebrew:
+  #   needs: release
+  #   runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout Homebrew Tap Repository
-        uses: actions/checkout@v2
-        with:
-          repository: kitlangton/homebrew-tap
-          path: homebrew-tap
+  #   steps:
+  #     - name: Checkout Homebrew Tap Repository
+  #       uses: actions/checkout@v2
+  #       with:
+  #         repository: kitlangton/homebrew-tap
+  #         path: homebrew-tap
 
-      - name: Extract version
-        id: extract-version
-        run: echo "tag-name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+  #     - name: Extract version
+  #       id: extract-version
+  #       run: echo "tag-name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Bump Homebrew Formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: given
-          formula-path: Formula/given.rb
-          homebrew-tap: kitlangton/homebrew-tap
-          base-branch: main
-          download-url: https://github.com/kitlangton/given/releases/download/${{ steps.extract-version.outputs.tag-name }}/given-macos
-        env:
-          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+  #     - name: Bump Homebrew Formula
+  #       uses: mislav/bump-homebrew-formula-action@v3
+  #       with:
+  #         formula-name: given
+  #         formula-path: Formula/given.rb
+  #         homebrew-tap: kitlangton/homebrew-tap
+  #         base-branch: main
+  #         download-url: https://github.com/kitlangton/given/releases/download/${{ steps.extract-version.outputs.tag-name }}/given-macos
+  #       env:
+  #         COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
