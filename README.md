@@ -2,13 +2,11 @@
 
 A tool for interactively updating your Scala dependencies.
 
-[https://www.youtube.com/watch?v=aMYZLe1vIfg]
-
 ## Example
 
 Execute `given` in the root of any Scala project, and you'll be presented with a list of version updates:
 
-![CleanShot 2024-06-06 at 07 54 48@2x](https://github.com/kitlangton/given/assets/7587245/b567ea4a-31cd-40fd-ba09-feebaaa7f25f)
+![CleanShot 2024-06-06 at 07 54 48@2x](https://github.com/kitlangton/given/assets/7587245/4b231115-5ddf-41ac-ba51-1134d9f165d3)
 
 Select whichever versions you'd like to update, and then hit enter. Voila!
 
