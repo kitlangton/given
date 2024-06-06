@@ -22,8 +22,7 @@ async fn main() {
     let mut app = cli::SupApp::default();
     app.run(false).await;
     if app.decided_to_update {
-        let entries: Vec<(&Group, &Artifact, &Version, &Version, &Vec<Location>)> =
-            app.entry_map.selected().collect();
+        let entries: Vec<_> = app.entry_map.selected().collect();
 
         process_updates(&entries);
         render_updated_message(&entries)
@@ -166,10 +165,10 @@ const FULLY_UPDATED_MESSAGES: [&str; 4] = [
 ];
 
 fn process_updates(entries: &[(&Group, &Artifact, &Version, &Version, &Vec<Location>)]) {
-    let version_updates: Vec<_> = entries
+    let version_updates = entries
         .iter()
         .map(|(_, _, _, new_version, locations)| ((*new_version).clone(), (*locations).clone()))
-        .collect();
+        .collect::<Vec<_>>();
 
-    write_version_updates(version_updates).unwrap();
+    write_version_updates(&version_updates).unwrap();
 }

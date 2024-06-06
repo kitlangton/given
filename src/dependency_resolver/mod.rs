@@ -1,33 +1,28 @@
 use crate::{
     model::{Artifact, Group, Version},
-    parser::{get_deps, get_scala_version_from_build_sbt, span::Edit, Span, WithSpan},
+    parser::{get_scala_version_from_build_sbt, span::Edit, Dependency, DependencyParser, Span},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::{collections::HashMap, path::Path};
 use std::{fs, path::PathBuf};
 
-#[derive(Debug)]
-pub struct Dependency {
-    pub group: Group,
-    pub artifact: Artifact,
-    pub version: WithSpan<Version>,
-}
-
-#[derive(Debug)]
-pub struct FileDependencies {
-    pub file_path: PathBuf,
-    pub dependencies: Vec<(Group, Artifact, WithSpan<Version>)>,
-}
+mod file_cache;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
-    pub file_path: PathBuf,
+    pub path: PathBuf,
     pub span: Span,
+}
+
+impl Location {
+    pub fn new(path: PathBuf, span: Span) -> Self {
+        Self { path, span }
+    }
 }
 
 // A particular group and artifact might exist in the codebase at MULTIPLE locations.
 // These should be grouped together.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VersionWithLocations {
     pub version: Version,
     pub locations: Vec<Location>,
@@ -85,132 +80,58 @@ impl DependencyMap {
         }
     }
 
-    pub fn add_dependency(&mut self, dependency: Dependency, location: Location) {
-        let key = (dependency.group, dependency.artifact);
-        self.map
-            .entry(key)
-            .and_modify(|existing| existing.add(&dependency.version.value, &location))
-            .or_insert_with(|| VersionWithLocations::new(&dependency.version.value, &location));
-    }
-
-    pub fn add_file_dependencies(&mut self, file_dependencies: FileDependencies) {
-        for (group, artifact, version) in &file_dependencies.dependencies {
-            self.add_dependency(
-                Dependency {
-                    group: group.clone(),
-                    artifact: artifact.clone(),
-                    version: version.clone(),
-                },
-                Location {
-                    file_path: file_dependencies.file_path.clone(),
-                    span: version.position.clone(),
-                },
-            );
-        }
-    }
-
-    pub fn from_file_dependencies(file_dependencies: Vec<FileDependencies>) -> Self {
+    pub fn from_dependencies(dependencies: Vec<Dependency>) -> Self {
         let mut map = Self::new();
-        for file_dependency in file_dependencies {
-            map.add_file_dependencies(file_dependency);
+        for dependency in dependencies {
+            map.add_dependency(&dependency);
         }
         map
+    }
+
+    pub fn add_dependency(&mut self, dependency: &Dependency) {
+        let key = (dependency.group.clone(), dependency.artifact.clone());
+        let location = &dependency.version.location;
+        self.map
+            .entry(key)
+            .and_modify(|existing| existing.add(&dependency.version.value, location))
+            .or_insert_with(|| VersionWithLocations::new(&dependency.version.value, location));
     }
 }
 
 /// - read build.sbt
 /// - read every scala file in the project folder
-/// TODO: Support val defs defined in OTHER files.
 pub fn collect_sbt_dependencies(project_path: &Path) -> Result<DependencyMap> {
-    // 1. Load dependencies from build.sbt
+    let mut dependency_parser = DependencyParser::new();
+    let all_dependency_paths = all_dependency_paths(project_path);
+    let mut file_cache = file_cache::FileCache::new();
+
+    // load all val defs from all files
+    for path in &all_dependency_paths {
+        let code = file_cache.read_to_string(path)?;
+        dependency_parser.parse_val_defs(path, &code);
+    }
+
+    // load all dependencies from all files
+    for path in &all_dependency_paths {
+        let code = file_cache.read_to_string(path)?;
+        dependency_parser.parse_dependencies(path, &code);
+    }
+
+    let mut dependencies = dependency_parser.dependencies;
+
+    // attempt to parse scala version from build.sbt
     let build_sbt_path = project_path.join("build.sbt");
-    let mut dependencies = Vec::new();
-
     if build_sbt_path.exists() {
-        let project_dependencies = collect_dependencies_from_file(build_sbt_path.as_path())
-            .context("Failed to collect dependencies from build.sbt")?;
-        dependencies.push(project_dependencies);
-
-        let code =
-            fs::read_to_string(build_sbt_path.as_path()).context("Failed to read build.sbt")?;
-
-        if let Some(scala_version) = get_scala_version_from_build_sbt(&code) {
-            dependencies.push(FileDependencies {
-                file_path: build_sbt_path,
-                dependencies: vec![scala_version],
-            });
+        let code = file_cache.read_to_string(&build_sbt_path)?;
+        if let Some(scala_version) = get_scala_version_from_build_sbt(&build_sbt_path, &code) {
+            dependencies.push(scala_version);
         }
     }
 
-    // 2. Load dependencies from repo/project/plugins.sbt
-
-    let plugins_sbt_path = project_path.join("project/plugins.sbt");
-    if plugins_sbt_path.exists() {
-        let plugins_sbt_dependencies =
-            collect_dependencies_from_file(plugins_sbt_path.as_path())
-                .context("Failed to collect dependencies from plugins.sbt")?;
-        dependencies.push(plugins_sbt_dependencies);
-    }
-
-    // 3. Load dependencies from repo/project/
-    let project_folder = project_path.join("project");
-    if project_folder.exists() {
-        let scala_files = collect_dependencies_from_dir(project_folder, Some("scala"))
-            .context("Failed to collect dependencies from Scala files")?;
-        dependencies.extend(scala_files);
-    }
-
-    Ok(DependencyMap::from_file_dependencies(dependencies))
+    Ok(DependencyMap::from_dependencies(dependencies))
 }
 
-pub fn collect_dependencies_from_dir(
-    dir: PathBuf,
-    extension_filter: Option<&str>,
-) -> Result<Vec<FileDependencies>> {
-    let mut results = Vec::new();
-    let paths = fs::read_dir(dir).context("Failed to read directory")?;
-
-    for path in paths {
-        let path = path.context("Failed to read path")?.path();
-        if path.is_file() {
-            if let Some(ext) = extension_filter {
-                if path.extension().and_then(|e| e.to_str()) != Some(ext) {
-                    continue;
-                }
-            }
-
-            let file_path_str = path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 path"))?;
-
-            let file_dependencies = collect_dependencies_from_file(Path::new(file_path_str))
-                .context(format!(
-                    "Failed to collect dependencies from file: {}",
-                    file_path_str
-                ))?;
-
-            results.push(file_dependencies);
-        }
-    }
-
-    Ok(results)
-}
-
-pub fn collect_dependencies_from_file(file_path: &Path) -> Result<FileDependencies> {
-    let code = fs::read_to_string(file_path)
-        .context(format!("Failed to read file: {}", file_path.display()))?;
-    let dependencies = get_deps(&code);
-
-    Ok(FileDependencies {
-        file_path: PathBuf::from(file_path),
-        dependencies,
-    })
-}
-
-pub fn write_version_updates(updates: Vec<(Version, Vec<Location>)>) -> std::io::Result<()> {
-    use std::collections::HashMap;
-    use std::fs;
-
+pub fn write_version_updates(updates: &[(Version, Vec<Location>)]) -> std::io::Result<()> {
     // Step 1: Group updates by file path
     let mut updates_by_file: HashMap<PathBuf, Vec<Edit>> = HashMap::new();
     for (version, locations) in updates {
@@ -220,7 +141,7 @@ pub fn write_version_updates(updates: Vec<(Version, Vec<Location>)>) -> std::io:
                 text: format!("\"{}\"", version),
             };
             updates_by_file
-                .entry(location.file_path.clone())
+                .entry(location.path.clone())
                 .or_default()
                 .push(edit);
         }
@@ -234,6 +155,29 @@ pub fn write_version_updates(updates: Vec<(Version, Vec<Location>)>) -> std::io:
     }
 
     Ok(())
+}
+
+fn all_dependency_paths(project_path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        project_path.join("build.sbt"),
+        project_path.join("project/plugins.sbt"),
+    ];
+
+    collect_scala_files(project_path, &mut paths);
+    paths.into_iter().filter(|path| path.exists()).collect()
+}
+
+fn collect_scala_files(dir: &Path, paths: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_scala_files(&path, paths);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("scala") {
+                paths.push(path);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -260,24 +204,46 @@ mod tests {
 
     #[test]
     fn test_full_stack_version_update() -> std::io::Result<()> {
-        // Step 1: Create a temporary directory and sample build.sbt file
-        println!("Creating temporary directory and sample build.sbt file...");
+        // Step 1: Create a temporary directory and sample build.sbt and versions.scala files
+        println!("Creating temporary directory and sample build.sbt and versions.scala files...");
         let dir = tempdir()?;
-        let file_path = dir.path().join("build.sbt");
-        let mut file = File::create(&file_path)?;
+        let build_sbt_path = dir.path().join("build.sbt");
+        let versions_scala_path = dir.path().join("project/versions.scala");
+
+        // Create build.sbt file
+        let mut build_sbt_file = File::create(&build_sbt_path)?;
         writeln!(
-            file,
+            build_sbt_file,
             r#"
-            libraryDependencies ++= Seq(
-              "dev.zio" %% "zio" % "2.0.0",
-              "org.postgresql" % "postgresql" % "42.5.1"
-            )
+import Versions._
+libraryDependencies ++= Seq(
+    "dev.zio" %% "zio" % zio,
+    "io.github.kitlangton" %% "neotype" % Versions.neotype,
+    "org.postgresql" % "postgresql" % "42.5.1"
+)
         "#
         )?;
-        println!("Sample build.sbt file created at {:?}", file_path);
+        println!("Sample build.sbt file created at {:?}", build_sbt_path);
 
-        // Step 2: Read the dependencies from the file
-        println!("Reading dependencies from the file...");
+        // Create versions.scala file
+        fs::create_dir_all(versions_scala_path.parent().unwrap())?;
+        let mut versions_scala_file = File::create(&versions_scala_path)?;
+        writeln!(
+            versions_scala_file,
+            r#"
+object Versions {{
+    val zio = "2.0.0"
+    val neotype = "0.1.0"
+}}
+            "#
+        )?;
+        println!(
+            "Sample versions.scala file created at {:?}",
+            versions_scala_path
+        );
+
+        // Step 2: Read the dependencies from the files
+        println!("Reading dependencies from the files...");
         let dependencies = collect_sbt_dependencies(&dir.path());
         println!("Dependencies read: {:?}", dependencies);
 
@@ -291,22 +257,44 @@ mod tests {
             .collect();
         println!("Updates selected: {:?}", updates);
 
-        // Step 4: Write the updated dependencies back to the file
-        println!("Writing updated dependencies back to the file...");
-        write_version_updates(updates)?;
-        println!("Updated dependencies written to the file.");
+        // Step 4: Write the updated dependencies back to the files
+        println!("Writing updated dependencies back to the files...");
+        write_version_updates(&updates)?;
+        println!("Updated dependencies written to the files.");
 
         // Verify the updates
         println!("Verifying the updates...");
-        let updated_content = fs::read_to_string(&file_path)?;
-        println!("Updated content: {}", updated_content);
-        let expected_content = r#"
-            libraryDependencies ++= Seq(
-              "dev.zio" %% "zio" % "999.999.999",
-              "org.postgresql" % "postgresql" % "999.999.999"
-            )
+        let updated_build_sbt_content = fs::read_to_string(&build_sbt_path)?;
+        let updated_versions_scala_content = fs::read_to_string(&versions_scala_path)?;
+        println!("Updated build.sbt content: {}", updated_build_sbt_content);
+        println!(
+            "Updated versions.scala content: {}",
+            updated_versions_scala_content
+        );
+
+        let expected_build_sbt_content = r#"
+import Versions._
+libraryDependencies ++= Seq(
+    "dev.zio" %% "zio" % zio,
+    "io.github.kitlangton" %% "neotype" % Versions.neotype,
+    "org.postgresql" % "postgresql" % "999.999.999"
+)
         "#;
-        assert_eq!(updated_content.trim(), expected_content.trim());
+        let expected_versions_scala_content = r#"
+object Versions {
+    val zio = "999.999.999"
+    val neotype = "999.999.999"
+}
+        "#;
+
+        assert_eq!(
+            updated_build_sbt_content.trim(),
+            expected_build_sbt_content.trim()
+        );
+        assert_eq!(
+            updated_versions_scala_content.trim(),
+            expected_versions_scala_content.trim()
+        );
         println!("Updates verified successfully.");
 
         Ok(())
