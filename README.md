@@ -28,10 +28,3 @@ cargo install given
 <a href="https://www.youtube.com/watch?v=aMYZLe1vIfg" title="NEOTYPE TOUR">
     <img src="https://img.youtube.com/vi/aMYZLe1vIfg/maxresdefault.jpg" alt="GIVEN VIDEO DEMO" width="500" height="300">
 </a>
-
-### TODO
-
-- [ ] Publish to Homebrew
-- [ ] Support Mill
-- [ ] Nicely scroll the view when it's too big
-- [ ] Handle weird versioning (e.g., javassist 3.12.1.GA → 3.1.0 Major)
